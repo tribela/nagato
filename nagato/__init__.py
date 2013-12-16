@@ -110,8 +110,11 @@ def start_proxy(host, port, ipv6, timeout, handler):
         conn = sock.accept()
         thread.start_new_thread(handler, conn + (timeout,))
 
-if __name__ == '__main__':
+def main():
     try:
         start_proxy('localhost', 8080, ipv6=False, timeout=60, handler=MagicProxy)
     except KeyboardInterrupt:
         exit(0)
+
+if __name__ == '__main__':
+    main()

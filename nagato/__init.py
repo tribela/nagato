@@ -50,6 +50,9 @@ class MagicProxy():
         host = matched.group('host')
         path = matched.group('path')
 
+        #magic trick
+        path = 'https://%s%s' % (host, path)
+
         self._connect_target(host)
         self.target.send('{0} {1} {2}\n'.format(self.method, path, self.protocol))
         self.target.send(self.client_buffer)

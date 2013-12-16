@@ -14,3 +14,14 @@ You can install, upgrade, remove nagato using ``pip``:
    $ pip install git+git://github.com/kjwon15/nagato.git
    $ pip install --upgrade git+git://github.com/kjwon15/nagato.git
    $ pip uninstall git+git://github.com/kjwon15/nagato.git
+
+Usage
+-----
+
+You just execute nagato in your terminal
+
+.. code-block:: console
+
+   $ nagato
+
+then, you should be config your browser's config to use nagato proxy: localhost:8080

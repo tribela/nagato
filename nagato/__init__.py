@@ -21,7 +21,8 @@ class MagicProxy():
         self.method, self.path, self.protocol = self.get_base_header()
         if self.method == 'CONNECT':
             self.method_connect()
-        elif self.method in ('GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'TRACE'):
+        elif self.method in ('GET', 'POST', 'PUT',
+                             'DELETE', 'OPTIONS', 'TRACE'):
             self.method_others()
         self.client.close()
         self.target.close()
@@ -54,7 +55,8 @@ class MagicProxy():
         path = 'https://%s%s' % (host, path)
 
         self._connect_target(host)
-        self.target.send('{0} {1} {2}\n'.format(self.method, path, self.protocol))
+        self.target.send('{0} {1} {2}\n'.format(
+            self.method, path, self.protocol))
         self.target.send(self.client_buffer)
         self.client_buffer = ''
         self._read_write()
@@ -110,9 +112,11 @@ def start_proxy(host, port, ipv6, timeout, handler):
         conn = sock.accept()
         thread.start_new_thread(handler, conn + (timeout,))
 
+
 def main():
     try:
-        start_proxy('localhost', 8080, ipv6=False, timeout=60, handler=MagicProxy)
+        start_proxy('localhost', 8080, ipv6=False, timeout=60,
+                    handler=MagicProxy)
     except KeyboardInterrupt:
         exit(0)
 

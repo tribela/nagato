@@ -1,7 +1,7 @@
 import re
 import socket
 import select
-import thread
+import threading
 
 __version__ = '0.1.0'
 
@@ -108,9 +108,18 @@ def start_proxy(host, port, ipv6, timeout, handler):
     sock.bind((host, port))
     print("Listening on {0}:{1}.".format(host, port))
     sock.listen(0)
+    threads = []
     while 1:
-        conn = sock.accept()
-        thread.start_new_thread(handler, conn + (timeout,))
+        (conn, address) = sock.accept()
+        _thread = threading.Thread(target=handler,
+                                   args=(conn, address, timeout))
+        _thread.setDaemon(True)
+        _thread.start()
+
+        threads.append(_thread)
+        for _thread in threads:
+            if not _thread.isAlive():
+                _thread.join()
 
 
 def main():

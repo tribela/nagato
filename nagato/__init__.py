@@ -1,3 +1,4 @@
+import logging
 import re
 import socket
 import select
@@ -8,6 +9,8 @@ __version__ = '0.2.0'
 HTTPVER = 'HTTP/1.1'
 BUFLEN = 1024
 VERSION = 'Nagato proxy/{0}'.format(__version__)
+
+logger = logging.getLogger(__name__)
 
 
 class MagicProxy():
@@ -34,7 +37,7 @@ class MagicProxy():
             if eol != -1:
                 break
 
-        print(self.client_buffer[:eol])
+        logger.info(self.client_buffer[:eol])
         data = self.client_buffer[:eol+1].split()
         self.client_buffer = self.client_buffer[eol+1:]
         return data
@@ -106,7 +109,7 @@ def start_proxy(host, port, ipv6, timeout, handler):
     sock = socket.socket(sock_type)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((host, port))
-    print("Listening on {0}:{1}.".format(host, port))
+    logger.info("Listening on {0}:{1}.".format(host, port))
     sock.listen(0)
     threads = []
     while 1:

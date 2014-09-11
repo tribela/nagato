@@ -3,7 +3,7 @@ import socket
 import select
 import threading
 
-__version__ = '0.1.0'
+__version__ = '0.2.0'
 
 HTTPVER = 'HTTP/1.1'
 BUFLEN = 1024

@@ -128,13 +128,30 @@ def start_proxy(host, port, ipv6, timeout, handler):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-H', '--host', help='Host to bind', default='localhost')
-parser.add_argument('-p', '--port', help='Port to bind', default=8080)
+parser.add_argument('-p', '--port', type=int, help='Port to bind', default=8080)
+parser.add_argument('-v', '--verbose', default=0, action='count',
+                    help='Verbose output.')
+
+
+def set_logging_level(level):
+    if not level:
+        log_level = logging.WARNING
+    elif level == 1:
+        log_level = logging.INFO
+    else:
+        log_level = logging.DEBUG
+
+    logging.basicConfig(
+        format='%(asctime)s {%(module)s:%(levelname)s}: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S')
+    logging.getLogger(__name__).setLevel(log_level)
 
 
 def main():
     args = parser.parse_args()
     host = args.host
     port = args.port
+    set_logging_level(args.verbose)
     try:
         start_proxy(host, port, ipv6=False, timeout=60,
                     handler=MagicProxy)

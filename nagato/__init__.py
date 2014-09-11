@@ -1,3 +1,4 @@
+import argparse
 import logging
 import re
 import socket
@@ -125,9 +126,17 @@ def start_proxy(host, port, ipv6, timeout, handler):
                 _thread.join()
 
 
+parser = argparse.ArgumentParser()
+parser.add_argument('-H', '--host', help='Host to bind', default='localhost')
+parser.add_argument('-p', '--port', help='Port to bind', default=8080)
+
+
 def main():
+    args = parser.parse_args()
+    host = args.host
+    port = args.port
     try:
-        start_proxy('localhost', 8080, ipv6=False, timeout=60,
+        start_proxy(host, port, ipv6=False, timeout=60,
                     handler=MagicProxy)
     except KeyboardInterrupt:
         exit(0)

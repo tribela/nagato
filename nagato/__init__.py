@@ -5,6 +5,8 @@ import socket
 import select
 import threading
 
+from logging.handlers import RotatingFileHandler
+
 __version__ = '0.2.0'
 
 HTTPVER = 'HTTP/1.1'
@@ -131,9 +133,10 @@ parser.add_argument('-H', '--host', help='Host to bind', default='localhost')
 parser.add_argument('-p', '--port', type=int, help='Port to bind', default=8080)
 parser.add_argument('-v', '--verbose', default=0, action='count',
                     help='Verbose output.')
+parser.add_argument('-l', '--logfile', help='Filename for logging')
 
 
-def set_logging_level(level):
+def init_logging(level, filename=None):
     if not level:
         log_level = logging.WARNING
     elif level == 1:
@@ -141,17 +144,28 @@ def set_logging_level(level):
     else:
         log_level = logging.DEBUG
 
-    logging.basicConfig(
-        format='%(asctime)s {%(module)s:%(levelname)s}: %(message)s',
+    formatter = logging.Formatter(
+        '%(asctime)s {%(module)s:%(levelname)s}: %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S')
-    logging.getLogger(__name__).setLevel(log_level)
+    logger = logging.getLogger(__name__)
+    logger.setLevel(log_level)
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
+
+    if filename:
+        file_handler = RotatingFileHandler(filename)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
 
 
 def main():
     args = parser.parse_args()
     host = args.host
     port = args.port
-    set_logging_level(args.verbose)
+    init_logging(args.verbose, filename=args.logfile)
     try:
         start_proxy(host, port, ipv6=False, timeout=60,
                     handler=MagicProxy)

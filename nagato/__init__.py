@@ -65,7 +65,34 @@ class MagicProxy():
             self.method, path, self.protocol))
         self.target.send(self.client_buffer)
         self.client_buffer = ''
+        self.fix_server_header()
         self._read_write()
+
+    def fix_server_header(self):
+        data = ''
+        while '\r\n\r\n' not in data:
+            data += self.target.recv(BUFLEN)
+
+        head, other = data.split('\r\n\r\n', 1)
+        response, headers = head.split('\r\n', 1)
+
+        new_headers = []
+        for line in headers.split('\r\n'):
+            try:
+                key, val = line.split(': ', 1)
+                if key.lower() == 'connection':
+                    if val.lower() in ('keep-alive', 'persist'):
+                        new_headers.append('Connection: close')
+                    else:
+                        new_headers.append(line)
+                elif key.lower() != 'proxy-connection':
+                    new_headers.append(line)
+            except ValueError:
+                new_headers.append(line)
+
+
+        self.client.send('{0}{1}\n\n{2}'.format(
+            response, '\r\n'.join(new_headers), other))
 
     def _connect_target(self, host):
         matched = self.host.match(host)

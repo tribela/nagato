@@ -97,7 +97,7 @@ class MagicProxy():
     def _connect_target(self, host):
         matched = self.host.match(host)
         host = matched.group('host')
-        port = matched.group('port') or 80
+        port = matched.group('port') or 443 if self.method == 'CONNECT' else 80
 
         addrinfo = socket.getaddrinfo(host, port)[0]
         sock_family = addrinfo[0]

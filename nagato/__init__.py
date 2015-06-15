@@ -128,6 +128,8 @@ class MagicProxy():
                         count = 0
             if count == timeout_max:
                 break
+        self.client.close()
+        self.target.close()
 
 
 def start_proxy(host, port, ipv6, timeout, handler):
@@ -152,6 +154,7 @@ def start_proxy(host, port, ipv6, timeout, handler):
         threads.append(_thread)
         for _thread in threads:
             if not _thread.isAlive():
+                logger.debug('Joining thread')
                 _thread.join()
 
 

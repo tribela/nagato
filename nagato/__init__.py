@@ -22,7 +22,7 @@ class MagicProxy():
 
     def __init__(self, conn, address, timeout):
         self.client = conn
-        self.client_buffer = ''
+        self.client_buffer = b''
         self.timeout = timeout
         self.method, self.path, self.protocol = self.get_base_header()
         if self.method == 'CONNECT':

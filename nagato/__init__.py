@@ -10,7 +10,7 @@ from logging.handlers import RotatingFileHandler
 __version__ = '0.2.0'
 
 HTTPVER = 'HTTP/1.1'
-BUFLEN = 1024
+BUFLEN = 4096
 VERSION = 'Nagato proxy/{0}'.format(__version__)
 
 logger = logging.getLogger(__name__)

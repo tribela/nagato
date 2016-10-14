@@ -156,6 +156,7 @@ def start_proxy(host, port, ipv6, timeout, handler):
             if not _thread.isAlive():
                 logger.debug('Joining thread')
                 _thread.join()
+                threads.remove(_thread)
 
 
 parser = argparse.ArgumentParser()

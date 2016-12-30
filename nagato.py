@@ -30,6 +30,11 @@ class ServerConn(asyncio.Protocol):
     def connection_lost(self, *args):
         self.connected = False
 
+    def eof_received(self):
+        super().eof_received()
+        if self.server_transport:
+            self.server_transport.close()
+
 
 class NagatoProc(asyncio.Protocol):
 
@@ -91,6 +96,12 @@ class NagatoProc(asyncio.Protocol):
             data = self.buffer + data
             self.buffer = b''
             asyncio.Task(self.send_data(data))
+
+    def eof_received(self):
+        super().eof_received()
+        self.transport.close()
+        if self.client:
+            self.client.transport.close()
 
 
 @asyncio.coroutine

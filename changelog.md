@@ -1,3 +1,9 @@
+0.3.2
+-----
+
+- Close other socket when one is closing.
+
+
 0.3.1
 -----
 

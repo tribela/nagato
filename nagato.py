@@ -1,7 +1,10 @@
 import asyncore
+import logging
 import socket
 
 from six.moves.urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 
 class Sock(asyncore.dispatcher):
@@ -48,6 +51,7 @@ class NagatoServer(asyncore.dispatcher):
         c_sock, addr = pair
 
         first_line = self.get_dest(c_sock)
+        logger.info(first_line.decode('utf-8').strip())
         method, url, version = first_line.split(b' ', 2)
         parsed = urlparse(url)
         try:
@@ -77,9 +81,8 @@ class NagatoServer(asyncore.dispatcher):
     @classmethod
     def get_dest(cls, sock):
         first_line = NagatoServer.get_line(sock)
-        # headers = cls.get_headers(sock)
 
-        return first_line #, headers
+        return first_line
 
     @classmethod
     def get_line(cls, sock):
@@ -103,8 +106,13 @@ class NagatoServer(asyncore.dispatcher):
 
 
 def main():
+    logging.basicConfig(level=logging.INFO)
+    logger.setLevel(logging.INFO)
+    logger.info('Starting')
     server = NagatoServer('localhost', 8080)
     try:
         asyncore.loop()
+    except KeyboardInterrupt:
+        pass
     finally:
         server.close()

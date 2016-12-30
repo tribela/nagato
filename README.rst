@@ -22,7 +22,7 @@ You just execute nagato in your terminal.
 
 .. code-block:: console
 
-   $ nagato -H localhost -p 8080 -vv --logfile /tmp/nagato.log
+   $ nagato -H localhost -p 8080 -vv
 
 then, you should be config your browser's config to use nagato proxy: localhost:8080
 

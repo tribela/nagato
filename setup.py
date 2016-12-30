@@ -20,7 +20,7 @@ setup(
     name='nagato',
     description='Bypass korean firewall(warning.or.kr)',
     long_description=readme(),
-    url='http://kjwon15.ufree.org/',
+    url='https://github.com/kjwon15/nagato',
     author='Kjwon15',
     author_email='kjwonmail' '@' 'gmail.com',
     entry_points={
@@ -29,5 +29,5 @@ setup(
         ]
     },
     license='GPLv3 or later',
-    packages=find_packages(),
+    py_modules=['nagato'],
 )

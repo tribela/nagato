@@ -1,10 +1,15 @@
 .coverage
 .DS_Store
+.tox
 dist
 docs/_build
-libearth.egg-info
+build/
+venv/
+*.egg-info
 MANIFEST
 .*.swp
 *.egg
 *.pyc
-*.egg-info
+.DS_Store
+.idea
+.pipconfig

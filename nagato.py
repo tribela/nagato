@@ -4,6 +4,8 @@ import socket
 
 from six.moves.urllib.parse import urlparse
 
+__version__ = '0.1.0'
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,9 +51,40 @@ class NagatoServer(asyncore.dispatcher):
         if not pair:
             return
         c_sock, addr = pair
+        logger.info('Connection from {}'.format(addr))
 
         first_line = self.get_dest(c_sock)
         logger.info(first_line.decode('utf-8').strip())
+        method, url, version = first_line.split(b' ', 2)
+        if method == b'CONNECT':
+            self.do_connect(c_sock, first_line)
+        else:
+            self.do_proxy(c_sock, first_line)
+
+    @classmethod
+    def do_connect(cls, c_sock, first_line):
+        method, url, version = first_line.split(b' ', 2)
+
+        host, port = url.rsplit(b':', 1)
+        port = int(port)
+
+        headers = cls.get_headers(c_sock)
+
+        try:
+            s_sock = socket.create_connection((host, port))
+        except socket.error:
+            c_sock.close()
+        else:
+            c_sock.send(
+                version.strip() + b' 200 Connection established\r\n'
+                b'Proxy-Agent: Nagato/' + __version__.encode('utf-8') + b'\r\n\r\n'
+            )
+            a, b = Sock(c_sock), Sock(s_sock)
+            a.set_other(b)
+            b.set_other(a)
+
+    @classmethod
+    def do_proxy(cls, c_sock, first_line):
         method, url, version = first_line.split(b' ', 2)
         parsed = urlparse(url)
         try:

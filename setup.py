@@ -1,4 +1,5 @@
 import os.path
+from nagato import __version__ as version
 
 try:
     from setuptools import find_packages, setup
@@ -18,6 +19,7 @@ def readme():
 
 setup(
     name='nagato',
+    version=version,
     description='Bypass korean firewall(warning.or.kr)',
     long_description=readme(),
     url='https://github.com/kjwon15/nagato',

@@ -1,151 +1,98 @@
-import asyncore
+import asyncio
 import logging
-import socket
 
-from six.moves.urllib.parse import urlparse
+from urllib.parse import urlparse
 
 __version__ = '0.1.0'
 
 logger = logging.getLogger(__name__)
 
-
-class Sock(asyncore.dispatcher):
-
-    def __init__(self, sock):
-        asyncore.dispatcher.__init__(self, sock)
-        self.write_buffer = b''
-
-    def set_other(self, other):
-        self.other = other
-
-    def readable(self):
-        return not self.other.write_buffer
-
-    def handle_read(self):
-        self.other.write_buffer += self.recv(4096)
-
-    def handle_write(self):
-        sent = self.send(self.write_buffer)
-        self.write_buffer = self.write_buffer[sent:]
-
-    def handle_close(self):
-        self.close()
-        if self.other.other:
-            self.other.close()
-            self.other = None
+loop = asyncio.get_event_loop()
 
 
-class NagatoServer(asyncore.dispatcher):
+class ServerConn(asyncio.Protocol):
 
-    def __init__(self, host, port):
-        asyncore.dispatcher.__init__(self)
+    def connection_made(self, transport):
+        self.connected = True
+        self.transport = transport
 
-        self.create_socket()
-        self.set_reuse_addr()
-        self.bind((host, port))
+    def data_received(self, data):
+        self.server_transport.write(data)
 
-        self.listen(5)
+    def connection_lost(self, *args):
+        self.connected = False
 
-    def handle_accept(self):
-        pair = self.accept()
-        if not pair:
-            return
-        c_sock, addr = pair
-        logger.info('Connection from {}'.format(addr))
 
-        first_line = self.get_dest(c_sock)
-        logger.info(first_line.decode('utf-8').strip())
-        method, url, version = first_line.split(b' ', 2)
-        if method == b'CONNECT':
-            self.do_connect(c_sock, first_line)
+class NagatoProc(asyncio.Protocol):
+
+    def connection_made(self, transport):
+        self.transport = transport
+        self.buffer = b''
+        self.client = None
+
+    @asyncio.coroutine
+    def send_data(self, data):
+
+        if self.client is None or not self.client.connected:
+            first_line, rest = data.split(b'\r\n', 1)
+            print(first_line.decode('utf-8'))
+            method, url, httpver = first_line.split(b' ', 2)
+
+            if method == b'CONNECT':
+                host, port = url.rsplit(b':', 1)
+                port = int(port)
+                headers, rest = rest.rsplit(b'\r\n\r\n', 1)
+                protocol, client = yield from loop.create_connection(
+                    ServerConn, host, port)
+                client.server_transport = self.transport
+                self.transport.write(
+                    httpver + b' 200 Connection established\r\n'
+                    b'Proxy-Agent: Nagato/' +
+                    __version__.encode('utf-8') + b'\r\n\r\n'
+                )
+                client.transport.write(rest)
+            else:
+                parsed = urlparse(url)
+
+                try:
+                    host, port = parsed.netloc.rsplit(b':', 1)
+                    port = int(port)
+                except:
+                    host = parsed.netloc
+                    port = 80
+
+                first_line = b' '.join((
+                    method,
+                    parsed._replace(scheme=b'https').geturl(),
+                    httpver,
+                ))
+
+                protocol, client = yield from loop.create_connection(
+                    ServerConn, host, port)
+                client.server_transport = self.transport
+                client.transport.write(first_line + b'\r\n' + rest)
+
+            self.client = client
         else:
-            self.do_proxy(c_sock, first_line)
+            self.client.transport.write(data)
 
-    @classmethod
-    def do_connect(cls, c_sock, first_line):
-        method, url, version = first_line.split(b' ', 2)
-
-        host, port = url.rsplit(b':', 1)
-        port = int(port)
-
-        headers = cls.get_headers(c_sock)
-
-        try:
-            s_sock = socket.create_connection((host, port))
-        except socket.error:
-            c_sock.close()
+    def data_received(self, data):
+        if self.client is None and b'\r\n\r\n' not in (self.buffer + data):
+            self.buffer += data
         else:
-            c_sock.send(
-                version.strip() + b' 200 Connection established\r\n'
-                b'Proxy-Agent: Nagato/' + __version__.encode('utf-8') + b'\r\n\r\n'
-            )
-            a, b = Sock(c_sock), Sock(s_sock)
-            a.set_other(b)
-            b.set_other(a)
+            data = self.buffer + data
+            self.buffer = b''
+            asyncio.Task(self.send_data(data))
 
-    @classmethod
-    def do_proxy(cls, c_sock, first_line):
-        method, url, version = first_line.split(b' ', 2)
-        parsed = urlparse(url)
-        try:
-            host, port = parsed.netloc.rsplit(b':')
-            port = int(port)
-        except:
-            host = parsed.netloc
-            port = 80
 
-        first_line = b' '.join((
-            method,
-            parsed._replace(scheme=b'https').geturl(),  # Magic trick
-            version,
-        ))
-
-        try:
-            s_sock = socket.create_connection((host, port))
-        except socket.error as e:
-            # TODO: logging
-            c_sock.close()
-        else:
-            s_sock.send(first_line)
-            a, b = Sock(c_sock), Sock(s_sock)
-            a.set_other(b)
-            b.set_other(a)
-
-    @classmethod
-    def get_dest(cls, sock):
-        first_line = NagatoServer.get_line(sock)
-
-        return first_line
-
-    @classmethod
-    def get_line(cls, sock):
-        buff = b''
-        while not buff.endswith(b'\r\n'):
-            buff += sock.recv(1)
-
-        return buff
-
-    @classmethod
-    def get_headers(cls, sock):
-        headers = {}
-        while True:
-            line = cls.get_line(sock).rstrip(b'\r\n')
-            if not line:
-                break
-            key, val = line.split(b': ', 1)
-            headers[key] = val
-
-        return headers
+@asyncio.coroutine
+def initialize(loop):
+    yield from loop.create_server(NagatoProc, 'localhost', 8080)
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
     logger.setLevel(logging.INFO)
     logger.info('Starting')
-    server = NagatoServer('localhost', 8080)
-    try:
-        asyncore.loop()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.close()
+    asyncio.Task(initialize(loop))
+    loop.run_forever()

@@ -1,3 +1,10 @@
+0.3.3
+-----
+
+- Close loop after keyboard interrupt.
+- Logging with version.
+
+
 0.3.2
 -----
 

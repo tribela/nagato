@@ -130,6 +130,11 @@ def main():
 
     set_logger(args.verbose)
 
-    logger.info('Starting')
+    logger.info('Nagato {} Starting'.format(__version__))
     asyncio.Task(initialize(loop, args.host, args.port))
-    loop.run_forever()
+    try:
+        loop.run_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.close()

@@ -83,7 +83,15 @@ class NagatoProc(asyncio.Protocol):
                 protocol, client = yield from loop.create_connection(
                     ServerConn, host, port)
                 client.server_transport = self.transport
-                client.transport.write(first_line + b'\r\n' + rest)
+                client.transport.write(first_line + b'\r\n')
+
+                if b'\r\nHost: ' in rest:
+                    position = rest.find(b'\r\nHost: ')
+                    client.transport.write(rest[position+4:])
+                    client.transport.flush()
+                    client.transport.write(rest[:position+4])
+                else:
+                    client.transport.write(rest)
 
             self.client = client
         else:

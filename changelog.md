@@ -1,3 +1,10 @@
+0.4.0
+-----
+
+- Split "Host" header into different packet.
+  This trick help to bypass School's firewall.
+
+
 0.3.3
 -----
 

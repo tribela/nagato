@@ -3,6 +3,8 @@
 
 - Close loop after keyboard interrupt.
 - Logging with version.
+- Split "Host" header into different packet.
+  This trick help to bypass School's firewall.
 
 
 0.3.2

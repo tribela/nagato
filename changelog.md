@@ -1,3 +1,8 @@
+0.5.0
+-----
+
+- Show bind host, port on starting
+
 0.4.0
 -----
 

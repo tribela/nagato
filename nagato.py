@@ -138,7 +138,8 @@ def main():
 
     set_logger(args.verbose)
 
-    logger.info('Nagato {} Starting'.format(__version__))
+    logger.info('Nagato {} Starting on {}:{}'.format(
+        __version__, args.host, args.port))
     asyncio.Task(initialize(loop, args.host, args.port))
     try:
         loop.run_forever()

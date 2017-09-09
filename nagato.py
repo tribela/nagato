@@ -6,19 +6,32 @@ from urllib.parse import urlparse
 
 __version__ = '0.5.0'
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
-loop = asyncio.get_event_loop()
+_loop = asyncio.get_event_loop()
 
-parser = argparse.ArgumentParser()
-parser.add_argument('-H', '--host', help="Host to bind", default="localhost")
-parser.add_argument('-p', '--port', type=int,
-                    help="Port to bind", default="8080")
-parser.add_argument('-v', '--verbose', default=0, action='count',
-                    help="Verbose output.")
+
+def set_logger(level):
+    try:
+        log_level = [logging.WARNING, logging.INFO, logging.DEBUG][level]
+        _logger.setLevel(log_level)
+    except IndexError:
+        _logger.setLevel(logging.DEBUG)
+
+    formatter = logging.Formatter(
+        '%(asctime)s {%(module)s:%(levelname)s}: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S')
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+
+    _logger.addHandler(stream_handler)
 
 
 class ServerConn(asyncio.Protocol):
+    def __init__(self):
+        self.connected = False
+        self.transport = None
+        self.server_transport = None
 
     def connection_made(self, transport):
         self.connected = True
@@ -37,25 +50,25 @@ class ServerConn(asyncio.Protocol):
 
 
 class NagatoProc(asyncio.Protocol):
-
-    def connection_made(self, transport):
-        self.transport = transport
+    def __init__(self):
+        self.transport = None
         self.buffer = b''
         self.client = None
 
-    @asyncio.coroutine
-    def send_data(self, data):
+    def connection_made(self, transport):
+        self.transport = transport
 
+    async def send_data(self, data):
         if self.client is None or not self.client.connected:
             first_line, rest = data.split(b'\r\n', 1)
-            logger.info(first_line.decode('utf-8'))
+            _logger.info(first_line.decode('utf-8'))
             method, url, httpver = first_line.split(b' ', 2)
 
             if method == b'CONNECT':
                 host, port = url.rsplit(b':', 1)
                 port = int(port)
                 headers, rest = rest.rsplit(b'\r\n\r\n', 1)
-                protocol, client = yield from loop.create_connection(
+                protocol, client = await _loop.create_connection(
                     ServerConn, host, port)
                 client.server_transport = self.transport
                 self.transport.write(
@@ -70,7 +83,7 @@ class NagatoProc(asyncio.Protocol):
                 try:
                     host, port = parsed.netloc.rsplit(b':', 1)
                     port = int(port)
-                except:
+                except ValueError:
                     host = parsed.netloc
                     port = 80
 
@@ -80,7 +93,7 @@ class NagatoProc(asyncio.Protocol):
                     httpver,
                 ))
 
-                protocol, client = yield from loop.create_connection(
+                protocol, client = await _loop.create_connection(
                     ServerConn, host, port)
                 client.server_transport = self.transport
                 client.transport.write(first_line + b'\r\n')
@@ -103,7 +116,7 @@ class NagatoProc(asyncio.Protocol):
         else:
             data = self.buffer + data
             self.buffer = b''
-            asyncio.Task(self.send_data(data))
+            _loop.create_task(self.send_data(data))
 
     def eof_received(self):
         super().eof_received()
@@ -112,38 +125,30 @@ class NagatoProc(asyncio.Protocol):
             self.client.transport.close()
 
 
-@asyncio.coroutine
-def initialize(loop, host, port):
-    yield from loop.create_server(NagatoProc, host, port)
-
-
-def set_logger(level):
-    try:
-        log_level = [logging.WARNING, logging.INFO, logging.DEBUG][level]
-        logger.setLevel(log_level)
-    except IndexError:
-        logger.setLevel(logging.DEBUG)
-
-    formatter = logging.Formatter(
-        '%(asctime)s {%(module)s:%(levelname)s}: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S')
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(formatter)
-
-    logger.addHandler(stream_handler)
-
-
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-H', '--host', help="Host to bind",
+                        default="localhost")
+    parser.add_argument('-p', '--port', type=int,
+                        help="Port to bind", default="8080")
+    parser.add_argument('-v', '--verbose', default=0, action='count',
+                        help="Verbose output.")
+
     args = parser.parse_args()
 
     set_logger(args.verbose)
 
-    logger.info('Nagato {} Starting on {}:{}'.format(
+    _logger.info('Nagato {} Starting on {}:{}'.format(
         __version__, args.host, args.port))
-    asyncio.Task(initialize(loop, args.host, args.port))
+
+    coro = _loop.create_server(NagatoProc, args.host, args.port)
+    server = _loop.run_until_complete(coro)
+
     try:
-        loop.run_forever()
+        _loop.run_forever()
     except KeyboardInterrupt:
         pass
-    finally:
-        loop.close()
+
+    server.close()
+    _loop.run_until_complete(server.wait_closed())
+    _loop.close()

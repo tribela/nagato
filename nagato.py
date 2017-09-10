@@ -1,8 +1,10 @@
+import collections
 import argparse
 import asyncio
 import logging
 
 from urllib.parse import urlparse
+
 
 __version__ = '0.5.0'
 
@@ -27,102 +29,223 @@ def set_logger(level):
     _logger.addHandler(stream_handler)
 
 
-class ServerConn(asyncio.Protocol):
-    def __init__(self):
-        self.connected = False
-        self.transport = None
-        self.server_transport = None
+class HttpStreamReader:
+    def __init__(self, reader):
+        self.reader = reader
 
-    def connection_made(self, transport):
-        self.connected = True
-        self.transport = transport
+    async def _iterline(self):
+        line = await self.reader.readline()
+        if not line:
+            raise EOFError
+        return line
 
-    def data_received(self, data):
-        self.server_transport.write(data)
+    async def parse_request(self):
+        """
+        Parse an HTTP request and yield the results.
 
-    def connection_lost(self, *args):
-        self.connected = False
+        line, result: line is the raw line. result is None if nothing parsed.
 
-    def eof_received(self):
-        super().eof_received()
-        if self.server_transport:
-            self.server_transport.close()
+        int: the length of the following data bytes to be skipped for parsing.
+        """
+        # read the request line
+        req_line = await self._iterline()
+        method, url, version = req_line.decode().split(' ')
+        version = version.rstrip('\r\n')
+        yield req_line, (method, url, version)
+
+        # read the header fields, check the body length
+        body_len = 0
+        chunked = False
+
+        while True:
+            field_line = await self._iterline()
+            if field_line == b'\r\n':
+                yield field_line, None
+                break
+
+            name, value = field_line.decode().split(':', 1)
+            name = name.strip(' ').lower()
+            value = value.lstrip(' ').rstrip('\r\n')
+
+            if name == 'Content-Length'.lower():
+                body_len = int(value)
+            elif name == 'Transfer-Encoding'.lower():
+                codings = list(x.strip(' ') for x in value.split(','))
+                if 'chunked' in codings:
+                    chunked = True
+
+            yield field_line, (name, value)
+
+        # skip the body by yielding its length
+        if chunked:
+            while True:
+                line = await self._iterline()
+                yield line, None
+
+                chunk_len = int(line.rstrip(b'\r\n'), 16)
+                yield chunk_len
+
+                line = await self._iterline()
+                yield line, None
+
+                if chunk_len == 0:
+                    return
+
+        yield body_len
 
 
-class NagatoProc(asyncio.Protocol):
-    def __init__(self):
-        self.transport = None
-        self.buffer = b''
-        self.client = None
+class ConnectRequest(Exception):
+    def __init__(self, host, port, version):
+        self.host = host
+        self.port = port
+        self.version = version
 
-    def connection_made(self, transport):
-        self.transport = transport
 
-    async def send_data(self, data):
-        if self.client is None or not self.client.connected:
-            first_line, rest = data.split(b'\r\n', 1)
-            _logger.info(first_line.decode('utf-8'))
-            method, url, httpver = first_line.split(b' ', 2)
+async def tunnel_stream(reader, writer, closing):
+    try:
+        while True:
+            buf = await reader.read(65536)
+            if not buf:
+                break
+            writer.write(buf)
+    finally:
+        writer.close()
+        closing()
 
-            if method == b'CONNECT':
-                host, port = url.rsplit(b':', 1)
-                port = int(port)
-                headers, rest = rest.rsplit(b'\r\n\r\n', 1)
-                protocol, client = await _loop.create_connection(
-                    ServerConn, host, port)
-                client.server_transport = self.transport
-                self.transport.write(
-                    httpver + b' 200 Connection established\r\n'
-                    b'Proxy-Agent: Nagato/' +
-                    __version__.encode('utf-8') + b'\r\n\r\n'
-                )
-                client.transport.write(rest)
+
+async def tunnel_n(reader, writer, n):
+    while n > 0:
+        buf = await reader.read(65536)
+        n -= len(buf)
+        writer.write(buf)
+
+        if not buf and n > 0:
+            raise EOFError
+
+
+class NagatoStream:
+    def __init__(self, proxy_reader, proxy_writer):
+        self.proxy_reader = proxy_reader
+        self.proxy_writer = proxy_writer
+        self.server_reader = None
+        self.server_writer = None
+
+    async def handle_tunnel(self, host, port, version):
+        # open a tunneling connection
+        server_reader, server_writer \
+            = await asyncio.open_connection(host, port, loop=_loop)
+
+        self.proxy_writer.write((
+            f'{version} 200 Connection established\r\n'
+            f'Proxy-Agent: Nagato/{__version__}\r\n\r\n').encode())
+
+        # set tunneling
+        reader = tunnel_stream(self.proxy_reader, server_writer,
+                               lambda: self.proxy_writer.close())
+        writer = tunnel_stream(server_reader, self.proxy_writer,
+                               lambda: server_writer.close())
+        await asyncio.wait([reader, writer], loop=_loop)
+
+    async def handle_request(self, parser):
+        req_line, (method, url, version) = await parser.__anext__()
+        _logger.info(f'{method} {url} {version}')
+
+        if method == 'CONNECT':
+            # handle the tunneling request
+            host, port = url.rsplit(':', 1)
+            port = int(port)
+            raise ConnectRequest(host, port, version)
+
+        # handle the HTTP request
+        # handle the request line
+        parsed = urlparse(url)
+        try:
+            host, port = parsed.netloc.rsplit(':', 1)
+            port = int(port)
+        except ValueError:
+            host = parsed.netloc
+            port = 80
+
+        if self.server_reader is None or self.server_writer is None:
+            self.server_reader, self.server_writer \
+                = await asyncio.open_connection(host, port, loop=_loop)
+            _loop.create_task(tunnel_stream(
+                self.server_reader, self.proxy_writer,
+                lambda: self.server_writer.close()))
+
+        # replace by HTTPS
+        # noinspection PyProtectedMember
+        parsed = parsed._replace(scheme='https')
+        req_line = f'{method} {parsed.geturl()} {version}\r\n'.encode()
+        self.server_writer.write(req_line)
+
+        # handle the header fields
+        field_lines = []
+
+        while True:
+            field_line, field = await parser.__anext__()
+            if field is None:
+                field_lines.append(field_line)
+                break
+
+            name, value = field
+            if name == 'Host'.lower():
+                # host field segmentation
+                field_lines.append(b'Ho')
+                self.server_writer.write(b''.join(field_lines))
+                await self.server_writer.drain()
+
+                self.server_writer.write(f'st: {value}\r\n'.encode())
+                field_lines = []
+                continue
+            elif name == 'Proxy-Connection'.lower():
+                field_lines.append(f'Connection: {value}\r\n'.encode())
+                continue
+
+            field_lines.append(field_line)
+
+        self.server_writer.write(b''.join(field_lines))
+
+        # handle the body
+        while True:
+            try:
+                result = await parser.__anext__()
+            except StopAsyncIteration:
+                break
+
+            if isinstance(result, int):
+                data_len = result
+                if data_len > 0:
+                    await tunnel_n(self.proxy_reader, self.server_writer,
+                                   data_len)
             else:
-                parsed = urlparse(url)
+                self.server_writer.write(result[0])
 
+    async def handle_requests(self):
+        http_reader = HttpStreamReader(self.proxy_reader)
+
+        try:
+            while True:
+                # HTTP persistent connection
+                parser = http_reader.parse_request()
                 try:
-                    host, port = parsed.netloc.rsplit(b':', 1)
-                    port = int(port)
-                except ValueError:
-                    host = parsed.netloc
-                    port = 80
+                    await self.handle_request(parser)
+                except ConnectRequest as r:
+                    async for x in parser:
+                        # drop the rest, assuming no body
+                        pass
+                    await self.handle_tunnel(r.host, r.port, r.version)
+                    break
+        except EOFError:
+            pass
+        finally:
+            if self.server_writer is not None:
+                self.server_writer.close()
+            self.proxy_writer.close()
 
-                first_line = b' '.join((
-                    method,
-                    parsed._replace(scheme=b'https').geturl(),
-                    httpver,
-                ))
 
-                protocol, client = await _loop.create_connection(
-                    ServerConn, host, port)
-                client.server_transport = self.transport
-                client.transport.write(first_line + b'\r\n')
-
-                if b'\r\nHost: ' in rest:
-                    position = rest.find(b'\r\nHost: ')
-                    client.transport.write(rest[position+4:])
-                    client.transport.flush()
-                    client.transport.write(rest[:position+4])
-                else:
-                    client.transport.write(rest)
-
-            self.client = client
-        else:
-            self.client.transport.write(data)
-
-    def data_received(self, data):
-        if self.client is None and b'\r\n\r\n' not in (self.buffer + data):
-            self.buffer += data
-        else:
-            data = self.buffer + data
-            self.buffer = b''
-            _loop.create_task(self.send_data(data))
-
-    def eof_received(self):
-        super().eof_received()
-        self.transport.close()
-        if self.client:
-            self.client.transport.close()
+def nagato_stream(reader, writer):
+    return _loop.create_task(NagatoStream(reader, writer).handle_requests())
 
 
 def main():
@@ -141,7 +264,7 @@ def main():
     _logger.info('Nagato {} Starting on {}:{}'.format(
         __version__, args.host, args.port))
 
-    coro = _loop.create_server(NagatoProc, args.host, args.port)
+    coro = asyncio.start_server(nagato_stream, args.host, args.port, loop=_loop)
     server = _loop.run_until_complete(coro)
 
     try:

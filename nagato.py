@@ -1,6 +1,7 @@
 import struct
-import argparse
 import asyncio
+import random
+import argparse
 import logging
 
 from urllib.parse import urlparse
@@ -51,6 +52,21 @@ def tunnel_n(reader, writer, n):
 
         if not buf and n > 0:
             raise EOFError
+
+
+def random_str(size):
+    return ''.join(random.choice(
+        'abcdefghijklmnopqrstuvwxyz'
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZ') for _ in range(size))
+
+
+def random_split(s, step):
+    result = []
+    while s:
+        rr = random.randrange(step-1)+1
+        cur, s = s[:rr], s[rr:]
+        result.append(cur)
+    return result
 
 
 class NagatoStream:
@@ -144,13 +160,22 @@ class NagatoStream:
                 lambda: self.server_writer.close()))
 
         # replace by HTTPS
-        parsed = parsed._replace(scheme='https')
+        # parsed = parsed._replace(scheme='https')
+
+        # skip netloc, use host field instead
+        parsed = parsed._replace(scheme='', netloc='')
         req_line = '{} {} {}\r\n' \
             .format(method, parsed.geturl(), version) \
             .encode()
         self.server_writer.write(req_line)
 
-        # handle the header fields
+        # generate dummy fields
+        for _ in range(8):
+            self.server_writer.write('X-{}: {}\r\n'.format(
+                random_str(16), random_str(128)).encode())
+        yield from self.server_writer.drain()
+
+        # handle the header fields except host
         # check the body length
         field_lines = []
         body_len = 0
@@ -159,7 +184,6 @@ class NagatoStream:
         while True:
             field_line = yield from self._nextline()
             if field_line == b'\r\n':
-                field_lines.append(field_line)
                 break
 
             name, value = field_line.decode().split(':', 1)
@@ -167,13 +191,7 @@ class NagatoStream:
             value = value.lstrip(' ').rstrip('\r\n')
 
             if name == 'Host'.lower():
-                # host field segmentation
-                field_lines.append(b'Ho')
-                self.server_writer.write(b''.join(field_lines))
-                yield from self.server_writer.drain()
-
-                self.server_writer.write('st: {}\r\n'.format(value).encode())
-                field_lines = []
+                host = value
                 continue
             elif name == 'Proxy-Connection'.lower():
                 field_lines.append('Connection: {}\r\n'.format(value).encode())
@@ -188,6 +206,17 @@ class NagatoStream:
             field_lines.append(field_line)
 
         self.server_writer.write(b''.join(field_lines))
+
+        # handle the host field
+        # mix cases, no space between field name and value
+        host_line = 'hoSt:' + host + '\r\n\r\n'
+
+        # field segmentation
+        host_line = host_line.encode()
+        for p in [host_line[:2], *random_split(host_line[2:], 6)]:
+            self.server_writer.write(p)
+            yield from self.server_writer.drain()
+            yield from asyncio.sleep(random.randrange(10) / 1000.0, loop=_loop)
 
         # handle the body
         if chunked:

@@ -1,3 +1,4 @@
+import struct
 import argparse
 import asyncio
 import logging
@@ -60,6 +61,13 @@ class NagatoStream:
         self.server_writer = None
 
     @asyncio.coroutine
+    def _read(self, n):
+        buf = yield from self.proxy_reader.read(n)
+        if not buf:
+            raise EOFError
+        return buf
+
+    @asyncio.coroutine
     def _nextline(self):
         line = yield from self.proxy_reader.readline()
         if not line:
@@ -75,6 +83,19 @@ class NagatoStream:
         self.proxy_writer.write((
             '{} 200 Connection established\r\n'.format(version) +
             'Proxy-Agent: Nagato/{}\r\n\r\n'.format(__version__)).encode())
+
+        # handle TLS
+        buf = yield from self._read(5)
+        server_writer.write(buf)
+
+        if buf.startswith(b'\x16\x03\x01'):
+            # TLS Client Hello
+            hello_len, = struct.unpack('>H', buf[3:])
+            if hello_len > 85:
+                # try to segment SNI
+                buf = yield from self._read(85)
+                server_writer.write(buf)
+                yield from server_writer.drain()
 
         # set tunneling
         reader = tunnel_stream(self.proxy_reader, server_writer,

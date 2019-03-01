@@ -1,6 +1,7 @@
 import struct
-import argparse
 import asyncio
+import random
+import argparse
 import logging
 
 from urllib.parse import urlparse
@@ -60,12 +61,29 @@ def tunnel_n(reader: asyncio.StreamReader, writer, n):
             raise EOFError
 
 
+def random_str(size):
+    return ''.join(random.choice(
+        'abcdefghijklmnopqrstuvwxyz'
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZ') for _ in range(size))
+
+
+def random_split(s, step):
+    result = []
+    while s:
+        rr = random.randrange(step-1)+1
+        cur, s = s[:rr], s[rr:]
+        result.append(cur)
+    return result
+
+
 class NagatoStream:
     def __init__(self, proxy_reader: asyncio.StreamReader, proxy_writer):
         self.proxy_reader = proxy_reader
         self.proxy_writer = proxy_writer
         self.server_reader = None
         self.server_writer = None
+        self.host = None
+        self.port = None
 
     @asyncio.coroutine
     def read(self, n):
@@ -129,20 +147,30 @@ class NagatoStream:
         method, url, version = req_line
 
         # replace by HTTPS
-        # noinspection PyProtectedMember
-        self.server_writer.write('{} {} {}\r\n'.format(
-            method, url._replace(scheme='https').geturl(), version).encode())
+        # url = url._replace(scheme='https')
 
-        # handle the header fields
+        # skip netloc, use host field instead
+        # noinspection PyProtectedMember
+        url = url._replace(scheme='', netloc='')
+        self.server_writer.write('{} {} {}\r\n'.format(
+            method, url.geturl(), version).encode())
+
+        # generate dummy fields
+        for _ in range(8):
+            self.server_writer.write('X-{}: {}\r\n'.format(
+                random_str(16), random_str(128)).encode())
+        yield from self.server_writer.drain()
+
+        # handle the header fields except host
         # check the body length
         field_lines = []
+        host = None
         body_len = 0
         chunked = False
 
         while True:
             field_line = yield from self.nextline()
             if field_line == b'\r\n':
-                field_lines.append(field_line)
                 break
 
             name, value = field_line.decode().split(':', 1)
@@ -150,13 +178,7 @@ class NagatoStream:
             value = value.lstrip(' ').rstrip('\r\n')
 
             if name == 'Host'.lower():
-                # host field segmentation
-                field_lines.append(b'Ho')
-                self.server_writer.write(b''.join(field_lines))
-                yield from self.server_writer.drain()
-
-                self.server_writer.write('st: {}\r\n'.format(value).encode())
-                field_lines = []
+                host = value
                 continue
             elif name == 'Proxy-Connection'.lower():
                 field_lines.append('Connection: {}\r\n'.format(value).encode())
@@ -171,6 +193,17 @@ class NagatoStream:
             field_lines.append(field_line)
 
         self.server_writer.write(b''.join(field_lines))
+
+        # handle the host field
+        # mix cases, no space between field name and value
+        host_line = 'hoSt:' + (host or self.host) + '\r\n\r\n'
+
+        # field segmentation
+        host_line = host_line.encode()
+        for p in [host_line[:2], *random_split(host_line[2:], 6)]:
+            self.server_writer.write(p)
+            yield from self.server_writer.drain()
+            yield from asyncio.sleep(random.randrange(10) / 1000.0, loop=_loop)
 
         # handle the body
         if chunked:
@@ -234,6 +267,7 @@ class NagatoStream:
         try:
             self.server_reader, self.server_writer \
                 = yield from asyncio.open_connection(host, port, loop=_loop)
+            self.host, self.port = host, port
         except OSError:
             self.proxy_writer.write(PROXY_RESP_504.format(version).encode())
             self.proxy_writer.close()

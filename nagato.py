@@ -50,17 +50,6 @@ def tunnel_stream(reader, writer, closing):
         closing()
 
 
-@asyncio.coroutine
-def tunnel_n(reader: asyncio.StreamReader, writer, n):
-    while n > 0:
-        buf = yield from reader.read(65536)
-        n -= len(buf)
-        writer.write(buf)
-
-        if not buf and n > 0:
-            raise EOFError
-
-
 def random_str(size):
     return ''.join(random.choice(
         'abcdefghijklmnopqrstuvwxyz'
@@ -68,12 +57,134 @@ def random_str(size):
 
 
 def random_split(s, step):
-    result = []
     while s:
         rr = random.randrange(step-1)+1
         cur, s = s[:rr], s[rr:]
-        result.append(cur)
-    return result
+        yield cur
+
+
+class HttpStream:
+    def __init__(self, reader: asyncio.StreamReader, writer=None):
+        """
+        *writer* is used for tunneling if the argument *tunnel* is True.
+        """
+        self.reader = reader
+        self.writer = writer
+        self.field_done = False
+        self.body_len = 0
+        self.chunked = False
+        self.chunk_len = None
+        self.body_done = False
+
+    @asyncio.coroutine
+    def nextline(self):
+        line = yield from self.reader.readline()
+        if not line:
+            raise EOFError
+        return line
+
+    @asyncio.coroutine
+    def request_line(self, tunnel=False):
+        req_line = yield from self.nextline()
+        if tunnel:
+            self.writer.write(req_line)
+
+        method, url, version = req_line.decode().split(' ')
+        version = version.rstrip('\r\n')
+
+        _logger.info('{} {} {}'.format(method, url, version))
+        return method, urlparse(url), version
+
+    @asyncio.coroutine
+    def status_line(self, tunnel=False):
+        status_line = yield from self.nextline()
+        if tunnel:
+            self.writer.write(status_line)
+
+        version, status, reason = status_line.decode().split(' ')
+        reason = reason.rstrip('\r\n')
+        return version, status, reason
+
+    @asyncio.coroutine
+    def next_header_field(self, tunnel=False):
+        """
+        * ``tuple``: name, value (of ``str``)
+        * ``bytes``: empty line
+        * ``None``: header finished
+        """
+        if self.field_done:
+            return None
+
+        field_line = yield from self.nextline()
+        if tunnel:
+            self.writer.write(field_line)
+
+        if field_line == b'\r\n':
+            self.field_done = True
+            return field_line
+
+        name, value = field_line.decode().split(':', 1)
+        name = name.strip(' ')
+        value = value.lstrip(' ').rstrip('\r\n')
+
+        name_lower = name.lower()
+        if name_lower == 'Content-Length'.lower():
+            self.body_len = int(value)
+        elif name_lower == 'Transfer-Encoding'.lower():
+            codings = list(x.strip(' ') for x in value.split(','))
+            if 'chunked' in codings:
+                self.chunked = True
+
+        return name, value
+
+    @asyncio.coroutine
+    def next_chunk_ready(self, tunnel=False):
+        """
+        * ``int``: chunk or body length
+        * ``bytes``: line (expected to be empty)
+        * ``None``: body finished
+
+        The chunk or body data is not read by this method.
+        """
+        if self.body_done:
+            return None
+
+        if not self.chunked:
+            self.body_done = True
+            if self.body_len > 0:
+                return self.body_len
+            else:
+                return None
+
+        line = yield from self.nextline()
+        if tunnel:
+            self.writer.write(line)
+
+        if self.chunk_len is None:
+            chunk_len = int(line.rstrip(b'\r\n'), 16)
+            self.chunk_len = chunk_len
+            return chunk_len
+
+        if self.chunk_len == 0:
+            self.body_done = True
+
+        self.chunk_len = None
+        return line
+
+    @asyncio.coroutine
+    def tunnel_chunk(self):
+        if not self.chunked:
+            n = self.body_len
+        else:
+            n = self.chunk_len
+
+        while n > 0:
+            buf = yield from self.reader.read(65536)
+            n -= len(buf)
+            self.writer.write(buf)
+
+            if not buf and n > 0:
+                raise EOFError
 
 
 class NagatoStream:
@@ -91,22 +202,6 @@ class NagatoStream:
         if not buf:
             raise EOFError
         return buf
-
-    @asyncio.coroutine
-    def nextline(self):
-        line = yield from self.proxy_reader.readline()
-        if not line:
-            raise EOFError
-        return line
-
-    @asyncio.coroutine
-    def handle_req_line(self):
-        req_line = yield from self.nextline()
-        method, url, version = req_line.decode().split(' ')
-        version = version.rstrip('\r\n')
-
-        _logger.info('{} {} {}'.format(method, url, version))
-        return method, urlparse(url), version
 
     @asyncio.coroutine
     def handle_tunnel(self, host, port, version):
@@ -163,34 +258,26 @@ class NagatoStream:
 
         # handle the header fields except host
         # check the body length
+        http = HttpStream(self.proxy_reader, self.server_writer)
         field_lines = []
         host = None
-        body_len = 0
-        chunked = False
 
         while True:
-            field_line = yield from self.nextline()
-            if field_line == b'\r\n':
+            field = yield from http.next_header_field()
+            if field == b'\r\n' or field is None:
                 break
 
-            name, value = field_line.decode().split(':', 1)
-            name = name.strip(' ').lower()
-            value = value.lstrip(' ').rstrip('\r\n')
+            name, value = field
+            name_lower = name.lower()
 
-            if name == 'Host'.lower():
+            if name_lower == 'Host'.lower():
                 host = value
                 continue
-            elif name == 'Proxy-Connection'.lower():
+            elif name_lower == 'Proxy-Connection'.lower():
                 field_lines.append('Connection: {}\r\n'.format(value).encode())
                 continue
-            elif name == 'Content-Length'.lower():
-                body_len = int(value)
-            elif name == 'Transfer-Encoding'.lower():
-                codings = list(x.strip(' ') for x in value.split(','))
-                if 'chunked' in codings:
-                    chunked = True
 
-            field_lines.append(field_line)
+            field_lines.append('{}: {}\r\n'.format(name, value).encode())
 
         self.server_writer.write(b''.join(field_lines))
 
@@ -206,25 +293,12 @@ class NagatoStream:
             yield from asyncio.sleep(random.randrange(10) / 1000.0, loop=_loop)
 
         # handle the body
-        if chunked:
-            while True:
-                line = yield from self.nextline()
-                self.server_writer.write(line)
-
-                chunk_len = int(line.rstrip(b'\r\n'), 16)
-                if chunk_len > 0:
-                    yield from tunnel_n(self.proxy_reader, self.server_writer,
-                                        chunk_len)
-
-                line = yield from self.nextline()
-                self.server_writer.write(line)
-
-                if chunk_len == 0:
-                    return
-
-        if body_len > 0:
-            yield from tunnel_n(self.proxy_reader, self.server_writer,
-                                body_len)
+        while True:
+            chunk_line = yield from http.next_chunk_ready(tunnel=True)
+            if chunk_line is None:
+                break
+            if isinstance(chunk_line, int):
+                yield from http.tunnel_chunk()
 
     @asyncio.coroutine
     def handle_requests(self, req_line):
@@ -232,14 +306,16 @@ class NagatoStream:
             while True:
                 # HTTP persistent connection
                 yield from self.handle_request(req_line)
-                req_line = yield from self.handle_req_line()
+                req_line = yield from HttpStream(
+                    self.proxy_reader).request_line()
         except EOFError:
             pass
 
     @asyncio.coroutine
     def handle_streams(self):
         # connect to the server
-        req_line = yield from self.handle_req_line()
+        http = HttpStream(self.proxy_reader)
+        req_line = yield from http.request_line()
         method, url, version = req_line
 
         try:
@@ -256,7 +332,7 @@ class NagatoStream:
 
             # drop the rest, assuming no body
             while True:
-                line = yield from self.nextline()
+                line = yield from http.nextline()
                 if line == b'\r\n':
                     break
 

@@ -12,6 +12,13 @@ _logger = logging.getLogger(__name__)
 
 _loop = asyncio.get_event_loop()
 
+PROXY_RESP_504 = '{} 504 Gateway Timeout\r\n' \
+    + 'Proxy-Agent: Nagato/{}\r\n'.format(__version__) \
+    + 'Connection: close\r\n\r\n'
+
+PROXY_RESP_200 = '{} 200 Connection Established\r\n' \
+    + 'Proxy-Agent: Nagato/{}\r\n\r\n'.format(__version__)
+
 
 def set_logger(level):
     try:
@@ -43,7 +50,7 @@ def tunnel_stream(reader, writer, closing):
 
 
 @asyncio.coroutine
-def tunnel_n(reader, writer, n):
+def tunnel_n(reader: asyncio.StreamReader, writer, n):
     while n > 0:
         buf = yield from reader.read(65536)
         n -= len(buf)
@@ -54,38 +61,50 @@ def tunnel_n(reader, writer, n):
 
 
 class NagatoStream:
-    def __init__(self, proxy_reader, proxy_writer):
+    def __init__(self, proxy_reader: asyncio.StreamReader, proxy_writer):
         self.proxy_reader = proxy_reader
         self.proxy_writer = proxy_writer
         self.server_reader = None
         self.server_writer = None
 
     @asyncio.coroutine
-    def _read(self, n):
+    def read(self, n):
         buf = yield from self.proxy_reader.read(n)
         if not buf:
             raise EOFError
         return buf
 
     @asyncio.coroutine
-    def _nextline(self):
+    def nextline(self):
         line = yield from self.proxy_reader.readline()
         if not line:
             raise EOFError
         return line
 
     @asyncio.coroutine
-    def _handle_tunnel(self, host, port, version):
-        # open a tunneling connection
-        server_reader, server_writer \
-            = yield from asyncio.open_connection(host, port, loop=_loop)
+    def handle_req_line(self):
+        req_line = yield from self.nextline()
+        method, url, version = req_line.decode().split(' ')
+        version = version.rstrip('\r\n')
 
-        self.proxy_writer.write((
-            '{} 200 Connection established\r\n'.format(version) +
-            'Proxy-Agent: Nagato/{}\r\n\r\n'.format(__version__)).encode())
+        _logger.info('{} {} {}'.format(method, url, version))
+        return method, urlparse(url), version
+
+    @asyncio.coroutine
+    def handle_tunnel(self, host, port, version):
+        # open a tunneling connection
+        try:
+            server_reader, server_writer \
+                = yield from asyncio.open_connection(host, port, loop=_loop)
+        except OSError:
+            self.proxy_writer.write(PROXY_RESP_504.format(version).encode())
+            self.proxy_writer.close()
+            return
+        else:
+            self.proxy_writer.write(PROXY_RESP_200.format(version).encode())
 
         # handle TLS
-        buf = yield from self._read(5)
+        buf = yield from self.read(5)
         server_writer.write(buf)
 
         if buf.startswith(b'\x16\x03\x01'):
@@ -93,11 +112,11 @@ class NagatoStream:
             hello_len, = struct.unpack('>H', buf[3:])
             if hello_len > 85:
                 # try to segment SNI
-                buf = yield from self._read(85)
+                buf = yield from self.read(85)
                 server_writer.write(buf)
                 yield from server_writer.drain()
 
-        # set tunneling
+        # start tunneling
         reader = tunnel_stream(self.proxy_reader, server_writer,
                                lambda: self.proxy_writer.close())
         writer = tunnel_stream(server_reader, self.proxy_writer,
@@ -105,50 +124,14 @@ class NagatoStream:
         yield from asyncio.wait([reader, writer], loop=_loop)
 
     @asyncio.coroutine
-    def _handle_request(self):
-        # read the request line
-        req_line = yield from self._nextline()
-        method, url, version = req_line.decode().split(' ')
-        version = version.rstrip('\r\n')
-        _logger.info('{} {} {}'.format(method, url, version))
-
-        if method == 'CONNECT':
-            # handle the tunneling request
-            host, port = url.rsplit(':', 1)
-            port = int(port)
-
-            # drop the rest, assuming no body
-            while True:
-                line = yield from self._nextline()
-                if line == b'\r\n':
-                    break
-
-            yield from self._handle_tunnel(host, port, version)
-            raise EOFError
-
-        # handle the HTTP request
+    def handle_request(self, req_line):
         # handle the request line
-        parsed = urlparse(url)
-        try:
-            host, port = parsed.netloc.rsplit(':', 1)
-            port = int(port)
-        except ValueError:
-            host = parsed.netloc
-            port = 80
-
-        if self.server_reader is None or self.server_writer is None:
-            self.server_reader, self.server_writer \
-                = yield from asyncio.open_connection(host, port, loop=_loop)
-            _loop.create_task(tunnel_stream(
-                self.server_reader, self.proxy_writer,
-                lambda: self.server_writer.close()))
+        method, url, version = req_line
 
         # replace by HTTPS
-        parsed = parsed._replace(scheme='https')
-        req_line = '{} {} {}\r\n' \
-            .format(method, parsed.geturl(), version) \
-            .encode()
-        self.server_writer.write(req_line)
+        # noinspection PyProtectedMember
+        self.server_writer.write('{} {} {}\r\n'.format(
+            method, url._replace(scheme='https').geturl(), version).encode())
 
         # handle the header fields
         # check the body length
@@ -157,7 +140,7 @@ class NagatoStream:
         chunked = False
 
         while True:
-            field_line = yield from self._nextline()
+            field_line = yield from self.nextline()
             if field_line == b'\r\n':
                 field_lines.append(field_line)
                 break
@@ -192,7 +175,7 @@ class NagatoStream:
         # handle the body
         if chunked:
             while True:
-                line = yield from self._nextline()
+                line = yield from self.nextline()
                 self.server_writer.write(line)
 
                 chunk_len = int(line.rstrip(b'\r\n'), 16)
@@ -200,7 +183,7 @@ class NagatoStream:
                     yield from tunnel_n(self.proxy_reader, self.server_writer,
                                         chunk_len)
 
-                line = yield from self._nextline()
+                line = yield from self.nextline()
                 self.server_writer.write(line)
 
                 if chunk_len == 0:
@@ -211,21 +194,68 @@ class NagatoStream:
                                 body_len)
 
     @asyncio.coroutine
-    def handle_requests(self):
+    def handle_requests(self, req_line):
         try:
             while True:
                 # HTTP persistent connection
-                yield from self._handle_request()
+                yield from self.handle_request(req_line)
+                req_line = yield from self.handle_req_line()
         except EOFError:
             pass
-        finally:
-            if self.server_writer is not None:
-                self.server_writer.close()
+
+    @asyncio.coroutine
+    def handle_streams(self):
+        # connect to the server
+        req_line = yield from self.handle_req_line()
+        method, url, version = req_line
+
+        try:
+            host, port = url.netloc.rsplit(':', 1)
+            port = int(port)
+        except ValueError:
+            host = url.netloc
+            port = 80
+
+        if method == 'CONNECT':
+            # handle the tunneling request
+            host, port = url.path.rsplit(':', 1)
+            port = int(port)
+
+            # drop the rest, assuming no body
+            while True:
+                line = yield from self.nextline()
+                if line == b'\r\n':
+                    break
+
+            yield from self.handle_tunnel(host, port, version)
+            return
+
+        # start relaying
+        try:
+            self.server_reader, self.server_writer \
+                = yield from asyncio.open_connection(host, port, loop=_loop)
+        except OSError:
+            self.proxy_writer.write(PROXY_RESP_504.format(version).encode())
             self.proxy_writer.close()
+            return
+
+        reader = self.handle_requests(req_line)
+        writer = tunnel_stream(self.server_reader, self.proxy_writer,
+                               lambda: self.server_writer.close())
+        yield from asyncio.wait([reader, writer], loop=_loop)
 
 
+@asyncio.coroutine
 def nagato_stream(reader, writer):
-    return _loop.create_task(NagatoStream(reader, writer).handle_requests())
+    streams = NagatoStream(reader, writer)
+    try:
+        yield from streams.handle_streams()
+    except EOFError:
+        pass
+    finally:
+        if streams.server_writer is not None:
+            streams.server_writer.close()
+        streams.proxy_writer.close()
 
 
 def main():
@@ -244,6 +274,7 @@ def main():
     _logger.info('Nagato {} Starting on {}:{}'.format(
         __version__, args.host, args.port))
 
+    # noinspection PyTypeChecker
     coro = asyncio.start_server(nagato_stream, args.host, args.port, loop=_loop)
     server = _loop.run_until_complete(coro)
 

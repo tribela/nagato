@@ -101,9 +101,9 @@ class HttpStream:
         if tunnel:
             self.writer.write(status_line)
 
-        version, status, reason = status_line.decode().split(' ')
+        version, status, reason = status_line.decode().split(' ', 2)
         reason = reason.rstrip('\r\n')
-        return version, status, reason
+        return version, int(status), reason
 
     @asyncio.coroutine
     def next_header_field(self, tunnel=False):
@@ -179,7 +179,8 @@ class HttpStream:
             n = self.chunk_len
 
         while n > 0:
-            buf = yield from self.reader.read(65536)
+            rlen = 65536 if n > 65536 else n
+            buf = yield from self.reader.read(rlen)
             n -= len(buf)
             self.writer.write(buf)
 

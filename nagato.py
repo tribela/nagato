@@ -26,6 +26,7 @@ PROXY_RESP_307 = '{} 307 Temporary Redirect\r\n' \
     + 'Connection: close\r\n\r\n'
 
 host_abs_url = {}
+"""host:port -> replace by HTTPS scheme?"""
 
 
 def set_logger(level):
@@ -64,6 +65,10 @@ def random_str(size):
 
 
 def random_split(s, step):
+    """
+    :type s: str | bytes
+    :type step: int
+    """
     while s:
         rr = random.randrange(step-1)+1
         cur, s = s[:rr], s[rr:]
@@ -92,6 +97,10 @@ class HttpStream:
 
     @asyncio.coroutine
     def request_line(self, tunnel=False):
+        """
+        Return tuple ``method, url, version`` of type
+        ``str, urllib.parse.ParseResult, str``.
+        """
         req_line = yield from self.nextline()
         if tunnel:
             self.writer.write(req_line)
@@ -104,6 +113,9 @@ class HttpStream:
 
     @asyncio.coroutine
     def status_line(self, tunnel=False):
+        """
+        Return tuple ``version, status, reason`` of type ``str, int, str``.
+        """
         status_line = yield from self.nextline()
         if tunnel:
             self.writer.write(status_line)
@@ -115,7 +127,7 @@ class HttpStream:
     @asyncio.coroutine
     def next_header_field(self, tunnel=False):
         """
-        * ``tuple``: name, value (of ``str``)
+        * ``tuple``: name, value of type ``str, str``
         * ``bytes``: empty line
         * ``None``: header finished
         """
@@ -202,8 +214,11 @@ class NagatoStream:
         self.server_reader = None
         self.server_writer = None
         self.host = None
+        """HTTP server host"""
         self.port = None
+        """HTTP server port"""
         self.last_url = None
+        """last requested URL"""
 
     @asyncio.coroutine
     def read(self, n):
@@ -247,6 +262,7 @@ class NagatoStream:
 
     @asyncio.coroutine
     def handle_request(self, req_line):
+        """:type req_line: (str, urllib.parse.ParseResult, str)"""
         # handle the request line
         method, url, version = req_line
         self.last_url = url
@@ -273,7 +289,6 @@ class NagatoStream:
             yield from self.server_writer.drain()
 
         # handle the header fields except host
-        # check the body length
         http = HttpStream(self.proxy_reader, self.server_writer)
         field_lines = []
         host = None
@@ -309,6 +324,7 @@ class NagatoStream:
                 yield from self.server_writer.drain()
                 yield from asyncio.sleep(random.randrange(10) / 1000.0,
                                          loop=_loop)
+        # finish handling the header
         self.server_writer.write(b'\r\n')
 
         # handle the body
@@ -322,13 +338,15 @@ class NagatoStream:
     @asyncio.coroutine
     def handle_response(self):
         http = HttpStream(self.server_reader, self.proxy_writer)
+        # handle the status line
         version, status, reason = yield from http.status_line()
 
         if 200 <= status < 300 or status == 304:
-            # success
+            # succeeded: continue to replace by HTTPS scheme
             host_abs_url['{}:{}'.format(self.host, self.port)] = True
         elif 400 <= status < 600 and status != 503:
-            # failed
+            # failed: restart and then don't replace scheme
+            # ignore the response from the server
             _logger.info('{} {} {} -> 307 Temporary Redirect'.format(
                 version, status, reason))
             host_abs_url['{}:{}'.format(self.host, self.port)] = False
@@ -337,10 +355,12 @@ class NagatoStream:
                 version, self.last_url.geturl()).encode())
             self.proxy_writer.close()
             raise EOFError
+        # inconclusive for the other status codes
 
         self.proxy_writer.write('{} {} {}\r\n'.format(
             version, status, reason).encode())
 
+        # just tunnel the rest
         while True:
             field = yield from http.next_header_field(True)
             if field is None:
@@ -355,6 +375,7 @@ class NagatoStream:
 
     @asyncio.coroutine
     def handle_requests(self, req_line):
+        """:type req_line: (str, urllib.parse.ParseResult, str)"""
         try:
             while True:
                 # HTTP persistent connection
@@ -369,13 +390,14 @@ class NagatoStream:
         host = '{}:{}'.format(self.host, self.port)
         try:
             while host_abs_url.get(host) is None:
+                # HTTP persistent connection
                 yield from self.handle_response()
         except EOFError:
             self.proxy_writer.close()
             self.server_writer.close()
             return
 
-        # switch to tunneling
+        # decided, so switch to tunnel everything
         yield from tunnel_stream(self.server_reader, self.proxy_writer,
                                  lambda: self.server_writer.close())
 
@@ -384,6 +406,7 @@ class NagatoStream:
         # connect to the server
         http = HttpStream(self.proxy_reader)
         req_line = yield from http.request_line()
+        """:type: (str, urllib.parse.ParseResult, str)"""
         method, url, version = req_line
 
         try:

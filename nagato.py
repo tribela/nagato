@@ -20,6 +20,13 @@ PROXY_RESP_504 = '{} 504 Gateway Timeout\r\n' \
 PROXY_RESP_200 = '{} 200 Connection Established\r\n' \
     + 'Proxy-Agent: Nagato/{}\r\n\r\n'.format(__version__)
 
+PROXY_RESP_307 = '{} 307 Temporary Redirect\r\n' \
+    + 'Location: {}\r\n' \
+    + 'Proxy-Agent: Nagato/{}\r\n'.format(__version__) \
+    + 'Connection: close\r\n\r\n'
+
+host_abs_url = {}
+
 
 def set_logger(level):
     try:
@@ -196,6 +203,7 @@ class NagatoStream:
         self.server_writer = None
         self.host = None
         self.port = None
+        self.last_url = None
 
     @asyncio.coroutine
     def read(self, n):
@@ -241,21 +249,28 @@ class NagatoStream:
     def handle_request(self, req_line):
         # handle the request line
         method, url, version = req_line
+        self.last_url = url
 
-        # replace by HTTPS
-        # url = url._replace(scheme='https')
+        is_absolute = host_abs_url.get(
+            '{}:{}'.format(self.host, self.port), True)
+        if is_absolute:
+            # replace by HTTPS
+            # noinspection PyProtectedMember
+            url = url._replace(scheme='https')
+        else:
+            # skip netloc, use host field instead
+            # noinspection PyProtectedMember
+            url = url._replace(scheme='', netloc='')
 
-        # skip netloc, use host field instead
-        # noinspection PyProtectedMember
-        url = url._replace(scheme='', netloc='')
         self.server_writer.write('{} {} {}\r\n'.format(
             method, url.geturl(), version).encode())
 
-        # generate dummy fields
-        for _ in range(8):
-            self.server_writer.write('X-{}: {}\r\n'.format(
-                random_str(16), random_str(128)).encode())
-        yield from self.server_writer.drain()
+        if not is_absolute:
+            # generate dummy fields
+            for _ in range(8):
+                self.server_writer.write('X-{}: {}\r\n'.format(
+                    random_str(16), random_str(128)).encode())
+            yield from self.server_writer.drain()
 
         # handle the header fields except host
         # check the body length
@@ -282,20 +297,57 @@ class NagatoStream:
 
         self.server_writer.write(b''.join(field_lines))
 
-        # handle the host field
-        # mix cases, no space between field name and value
-        host_line = 'hoSt:' + (host or self.host) + '\r\n\r\n'
+        if not is_absolute or host is not None:
+            # handle the host field
+            # mix cases, no space between field name and value
+            host_line = 'hoSt:' + (host or self.host) + '\r\n'
 
-        # field segmentation
-        host_line = host_line.encode()
-        for p in [host_line[:2], *random_split(host_line[2:], 6)]:
-            self.server_writer.write(p)
-            yield from self.server_writer.drain()
-            yield from asyncio.sleep(random.randrange(10) / 1000.0, loop=_loop)
+            # field segmentation
+            host_line = host_line.encode()
+            for p in [host_line[:2], *random_split(host_line[2:], 6)]:
+                self.server_writer.write(p)
+                yield from self.server_writer.drain()
+                yield from asyncio.sleep(random.randrange(10) / 1000.0,
+                                         loop=_loop)
+        self.server_writer.write(b'\r\n')
 
         # handle the body
         while True:
-            chunk_line = yield from http.next_chunk_ready(tunnel=True)
+            chunk_line = yield from http.next_chunk_ready(True)
+            if chunk_line is None:
+                break
+            if isinstance(chunk_line, int):
+                yield from http.tunnel_chunk()
+
+    @asyncio.coroutine
+    def handle_response(self):
+        http = HttpStream(self.server_reader, self.proxy_writer)
+        version, status, reason = yield from http.status_line()
+
+        if 200 <= status < 300 or status == 304:
+            # success
+            host_abs_url['{}:{}'.format(self.host, self.port)] = True
+        elif 400 <= status < 600 and status != 503:
+            # failed
+            _logger.info('{} {} {} -> 307 Temporary Redirect'.format(
+                version, status, reason))
+            host_abs_url['{}:{}'.format(self.host, self.port)] = False
+
+            self.proxy_writer.write(PROXY_RESP_307.format(
+                version, self.last_url.geturl()).encode())
+            self.proxy_writer.close()
+            raise EOFError
+
+        self.proxy_writer.write('{} {} {}\r\n'.format(
+            version, status, reason).encode())
+
+        while True:
+            field = yield from http.next_header_field(True)
+            if field is None:
+                break
+
+        while True:
+            chunk_line = yield from http.next_chunk_ready(True)
             if chunk_line is None:
                 break
             if isinstance(chunk_line, int):
@@ -311,6 +363,21 @@ class NagatoStream:
                     self.proxy_reader).request_line()
         except EOFError:
             pass
+
+    @asyncio.coroutine
+    def handle_responses(self):
+        host = '{}:{}'.format(self.host, self.port)
+        try:
+            while host_abs_url.get(host) is None:
+                yield from self.handle_response()
+        except EOFError:
+            self.proxy_writer.close()
+            self.server_writer.close()
+            return
+
+        # switch to tunneling
+        yield from tunnel_stream(self.server_reader, self.proxy_writer,
+                                 lambda: self.server_writer.close())
 
     @asyncio.coroutine
     def handle_streams(self):
@@ -351,8 +418,7 @@ class NagatoStream:
             return
 
         reader = self.handle_requests(req_line)
-        writer = tunnel_stream(self.server_reader, self.proxy_writer,
-                               lambda: self.server_writer.close())
+        writer = self.handle_responses()
         yield from asyncio.wait([reader, writer], loop=_loop)
 
 

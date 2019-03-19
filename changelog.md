@@ -1,3 +1,9 @@
+0.6.0
+-----
+
+- Bypass TLS version of warning
+
+
 0.5.0
 -----
 

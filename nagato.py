@@ -99,7 +99,7 @@ class HttpStream:
     def request_line(self, tunnel=False):
         """
         Return tuple ``method, url, version`` of type
-        ``str, urllib.parse.ParseResult, str``.
+        ``str, str, str``.
         """
         req_line = yield from self.nextline()
         if tunnel:
@@ -109,7 +109,7 @@ class HttpStream:
         version = version.rstrip('\r\n')
 
         _logger.info('{} {} {}'.format(method, url, version))
-        return method, urlparse(url), version
+        return method, url, version
 
     @asyncio.coroutine
     def status_line(self, tunnel=False):
@@ -267,19 +267,21 @@ class NagatoStream:
         method, url, version = req_line
         self.last_url = url
 
+        parsed = urlparse(url)
+
         is_absolute = host_abs_url.get(
             '{}:{}'.format(self.host, self.port), True)
         if is_absolute:
             # replace by HTTPS
             # noinspection PyProtectedMember
-            url = url._replace(scheme='https')
+            parsed = parsed._replace(scheme='https')
         else:
             # skip netloc, use host field instead
             # noinspection PyProtectedMember
-            url = url._replace(scheme='', netloc='')
+            parsed = parsed._replace(scheme='', netloc='')
 
         self.server_writer.write('{} {} {}\r\n'.format(
-            method, url.geturl(), version).encode())
+            method, parsed.geturl(), version).encode())
 
         if not is_absolute:
             # generate dummy fields
@@ -375,7 +377,7 @@ class NagatoStream:
 
     @asyncio.coroutine
     def handle_requests(self, req_line):
-        """:type req_line: (str, urllib.parse.ParseResult, str)"""
+        """:type req_line: (str, str, str)"""
         try:
             while True:
                 # HTTP persistent connection
@@ -410,15 +412,16 @@ class NagatoStream:
         method, url, version = req_line
 
         try:
-            host, port = url.netloc.rsplit(':', 1)
+            parsed = urlparse(url)
+            host, port = parsed.netloc.rsplit(':', 1)
             port = int(port)
         except ValueError:
-            host = url.netloc
+            host = parsed.netloc
             port = 80
 
         if method == 'CONNECT':
             # handle the tunneling request
-            host, port = url.path.rsplit(':', 1)
+            host, port = url.rsplit(':', 1)
             port = int(port)
 
             # drop the rest, assuming no body

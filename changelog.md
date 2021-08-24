@@ -1,3 +1,9 @@
+0.6.1
+-----
+
+- Hotfix for HTTPS CONNECT
+
+
 0.6.0
 -----
 

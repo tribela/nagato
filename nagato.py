@@ -7,7 +7,7 @@ import logging
 from urllib.parse import urlparse
 
 
-__version__ = '0.6.0'
+__version__ = '0.6.1'
 
 _logger = logging.getLogger(__name__)
 
